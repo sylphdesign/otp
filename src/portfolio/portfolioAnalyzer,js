@@ -1,0 +1,410 @@
+const Tesseract = require('tesseract.js');
+const sharp = require('sharp');
+const fs = require('fs').promises;
+const path = require('path');
+const axios = require('axios');
+
+class PortfolioAnalyzer {
+  constructor(aiAnalyzer, marketData) {
+    this.aiAnalyzer = aiAnalyzer;
+    this.marketData = marketData;
+    this.portfolioHistory = [];
+    this.currentPortfolio = null;
+  }
+
+  async analyzeScreenshot(imagePath, userId) {
+    try {
+      console.log('📸 Analyzing portfolio screenshot...');
+      
+      // 1. Preprocess image for better OCR
+      const processedPath = await this.preprocessImage(imagePath);
+      
+      // 2. Extract text from image
+      const extractedText = await this.extractTextFromImage(processedPath);
+      
+      // 3. Parse portfolio data
+      const portfolioData = this.parsePortfolioData(extractedText);
+      
+      // 4. Get AI analysis
+      const analysis = await this.getAIAnalysis(portfolioData);
+      
+      // 5. Store for history
+      this.storeAnalysis(userId, portfolioData, analysis);
+      
+      // Clean up
+      await fs.unlink(processedPath).catch(() => {});
+      
+      return {
+        portfolio: portfolioData,
+        analysis: analysis,
+        timestamp: new Date().toISOString()
+      };
+      
+    } catch (error) {
+      console.error('Error analyzing screenshot:', error);
+      throw error;
+    }
+  }
+
+  async preprocessImage(imagePath) {
+    const outputPath = imagePath.replace('.jpg', '_processed.jpg');
+    
+    try {
+      await sharp(imagePath)
+        .greyscale()
+        .normalize()
+        .sharpen()
+        .resize(2000, null, { 
+          withoutEnlargement: true,
+          fit: 'inside'
+        })
+        .toFile(outputPath);
+      
+      console.log('✅ Image preprocessed for OCR');
+      return outputPath;
+    } catch (error) {
+      console.error('Image preprocessing error:', error);
+      return imagePath; // Use original if processing fails
+    }
+  }
+
+  async extractTextFromImage(imagePath) {
+    try {
+      const result = await Tesseract.recognize(
+        imagePath,
+        'eng',
+        {
+          logger: m => console.log('OCR:', m.status)
+        }
+      );
+      
+      console.log('✅ Text extracted from image');
+      return result.data.text;
+    } catch (error) {
+      console.error('OCR error:', error);
+      throw new Error('Failed to read screenshot');
+    }
+  }
+
+  parsePortfolioData(text) {
+    console.log('🔍 Parsing portfolio data...');
+    
+    const portfolio = {
+      totalValue: null,
+      dayChange: null,
+      dayChangePercent: null,
+      positions: [],
+      options: [],
+      buyingPower: null,
+      extractedText: text // Keep for debugging
+    };
+
+    // Parse total portfolio value
+    const totalMatch = text.match(/\$?([\d,]+\.?\d*)\s*(?:Total|Portfolio)/i);
+    if (totalMatch) {
+      portfolio.totalValue = parseFloat(totalMatch[1].replace(/,/g, ''));
+    }
+
+    // Parse day change
+    const dayChangeMatch = text.match(/([+-]?\$?[\d,]+\.?\d*)\s*\(([+-]?[\d.]+%)\)\s*(?:Today|Day)/i);
+    if (dayChangeMatch) {
+      portfolio.dayChange = parseFloat(dayChangeMatch[1].replace(/[$,]/g, ''));
+      portfolio.dayChangePercent = parseFloat(dayChangeMatch[2].replace(/%/g, ''));
+    }
+
+    // Parse buying power
+    const buyingPowerMatch = text.match(/(?:Buying Power|Cash)\s*\$?([\d,]+\.?\d*)/i);
+    if (buyingPowerMatch) {
+      portfolio.buyingPower = parseFloat(buyingPowerMatch[1].replace(/,/g, ''));
+    }
+
+    // Parse stock positions
+    const stockRegex = /([A-Z]{1,5})\s+[\$]?([\d,]+\.?\d*)\s*(?:shares?|x)?\s*(?:@|at)?\s*\$?([\d,]+\.?\d*)\s*([+-]?\$?[\d,]+\.?\d*)\s*\(([+-]?[\d.]+%)\)/gi;
+    let match;
+    while ((match = stockRegex.exec(text)) !== null) {
+      portfolio.positions.push({
+        symbol: match[1],
+        shares: parseFloat(match[2]),
+        avgCost: parseFloat(match[3]),
+        currentPrice: null, // Will fetch
+        dayChange: parseFloat(match[4].replace(/[$,]/g, '')),
+        dayChangePercent: parseFloat(match[5].replace(/%/g, '')),
+        totalValue: null,
+        totalReturn: null
+      });
+    }
+
+    // Parse options positions
+    const optionRegex = /([A-Z]{1,5})\s+\$?([\d.]+)\s*(Call|Put|C|P)\s+(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\s*([+-]?\$?[\d,]+\.?\d*)\s*\(([+-]?[\d.]+%)\)/gi;
+    while ((match = optionRegex.exec(text)) !== null) {
+      portfolio.options.push({
+        symbol: match[1],
+        strike: parseFloat(match[2]),
+        type: match[3].toLowerCase().startsWith('c') ? 'call' : 'put',
+        expiration: match[4],
+        dayChange: parseFloat(match[5].replace(/[$,]/g, '')),
+        dayChangePercent: parseFloat(match[6].replace(/%/g, '')),
+        contracts: 1, // Default, may need to parse
+        currentValue: null
+      });
+    }
+
+    // If parsing failed, try alternative patterns
+    if (portfolio.positions.length === 0 && portfolio.options.length === 0) {
+      // Simple pattern: SYMBOL $PRICE
+      const simpleRegex = /([A-Z]{2,5})\s+\$?([\d,]+\.?\d*)/g;
+      while ((match = simpleRegex.exec(text)) !== null) {
+        const symbol = match[1];
+        const value = parseFloat(match[2].replace(/,/g, ''));
+        
+        // Skip if it looks like a total value
+        if (symbol !== 'TOTAL' && symbol !== 'DAY' && symbol !== 'BUYING') {
+          portfolio.positions.push({
+            symbol: symbol,
+            shares: null,
+            avgCost: null,
+            currentPrice: value,
+            dayChange: null,
+            dayChangePercent: null,
+            totalValue: value,
+            totalReturn: null
+          });
+        }
+      }
+    }
+
+    console.log(`✅ Parsed ${portfolio.positions.length} stocks, ${portfolio.options.length} options`);
+    return portfolio;
+  }
+
+  async getAIAnalysis(portfolioData) {
+    if (!this.aiAnalyzer.anthropic) {
+      return this.getMockAnalysis(portfolioData);
+    }
+
+    const prompt = `
+Analyze this investment portfolio and provide actionable recommendations:
+
+Portfolio Data:
+${JSON.stringify(portfolioData, null, 2)}
+
+Provide analysis in this format:
+{
+  "portfolioHealth": "excellent|good|fair|poor",
+  "riskLevel": "conservative|moderate|aggressive",
+  "diversification": "well-diversified|moderate|concentrated",
+  "immediateActions": [
+    "specific action items with reasoning"
+  ],
+  "positionAnalysis": {
+    "SYMBOL": {
+      "recommendation": "hold|buy_more|trim|sell",
+      "reasoning": "why",
+      "targetAction": "specific action",
+      "riskLevel": "low|medium|high"
+    }
+  },
+  "optionsAnalysis": {
+    "SYMBOL_STRIKE_TYPE": {
+      "recommendation": "hold|close|roll",
+      "reasoning": "why",
+      "daysToExpiry": number,
+      "threatLevel": "low|medium|high"
+    }
+  },
+  "suggestedTrades": [
+    {
+      "action": "buy|sell",
+      "symbol": "SYMBOL",
+      "type": "stock|option",
+      "reasoning": "why this trade makes sense",
+      "riskReward": "risk/reward analysis"
+    }
+  ],
+  "marketConsiderations": [
+    "current market factors affecting portfolio"
+  ],
+  "weeklyGoals": [
+    "specific goals for the week"
+  ]
+}`;
+
+    try {
+      const response = await this.aiAnalyzer.anthropic.messages.create({
+        model: "claude-3-sonnet-20240229",
+        max_tokens: 2000,
+        temperature: 0.3,
+        messages: [{ role: "user", content: prompt }]
+      });
+
+      const responseText = response.content[0].text;
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      
+      if (!jsonMatch) {
+        throw new Error("Invalid AI response format");
+      }
+
+      return JSON.parse(jsonMatch[0]);
+    } catch (error) {
+      console.error('AI analysis error:', error);
+      return this.getMockAnalysis(portfolioData);
+    }
+  }
+
+  getMockAnalysis(portfolioData) {
+    const totalPositions = portfolioData.positions.length + portfolioData.options.length;
+    
+    return {
+      portfolioHealth: totalPositions > 5 ? "good" : "fair",
+      riskLevel: portfolioData.options.length > 3 ? "aggressive" : "moderate",
+      diversification: totalPositions > 10 ? "well-diversified" : "concentrated",
+      immediateActions: [
+        "Review options expiring this week",
+        "Consider taking profits on positions up >20%",
+        "Add stop losses to positions down >15%"
+      ],
+      positionAnalysis: portfolioData.positions.reduce((acc, pos) => {
+        acc[pos.symbol] = {
+          recommendation: pos.dayChangePercent > 5 ? "trim" : "hold",
+          reasoning: "Based on recent momentum",
+          targetAction: `Set stop at ${pos.currentPrice * 0.95}`,
+          riskLevel: "medium"
+        };
+        return acc;
+      }, {}),
+      optionsAnalysis: portfolioData.options.reduce((acc, opt) => {
+        const key = `${opt.symbol}_${opt.strike}${opt.type[0].toUpperCase()}`;
+        acc[key] = {
+          recommendation: "monitor",
+          reasoning: "Check theta decay",
+          daysToExpiry: 5, // Would calculate
+          threatLevel: "medium"
+        };
+        return acc;
+      }, {}),
+      suggestedTrades: [
+        {
+          action: "buy",
+          symbol: "SPY",
+          type: "option",
+          reasoning: "Portfolio lacks market hedge",
+          riskReward: "1:3 risk/reward with protective puts"
+        }
+      ],
+      marketConsiderations: [
+        "Market volatility increasing - consider hedges",
+        "Earnings season approaching - review positions"
+      ],
+      weeklyGoals: [
+        "Close options expiring Friday",
+        "Rebalance portfolio to target allocations",
+        "Review and adjust stop losses"
+      ]
+    };
+  }
+
+  formatAnalysisMessage(analysis) {
+    const { portfolio, analysis: ai } = analysis;
+    
+    return `
+📊 **PORTFOLIO ANALYSIS**
+
+**Overall Health**: ${this.getHealthEmoji(ai.portfolioHealth)} ${ai.portfolioHealth.toUpperCase()}
+**Risk Level**: ${ai.riskLevel}
+**Diversification**: ${ai.diversification}
+
+💰 **Portfolio Summary**:
+• Total Value: $${portfolio.totalValue?.toLocaleString() || 'N/A'}
+• Day Change: ${portfolio.dayChange >= 0 ? '+' : ''}$${portfolio.dayChange?.toFixed(2) || '0'} (${portfolio.dayChangePercent?.toFixed(2) || '0'}%)
+• Positions: ${portfolio.positions.length} stocks, ${portfolio.options.length} options
+• Buying Power: $${portfolio.buyingPower?.toLocaleString() || 'N/A'}
+
+🎯 **IMMEDIATE ACTIONS**:
+${ai.immediateActions.map((action, i) => `${i + 1}. ${action}`).join('\n')}
+
+📈 **POSITION RECOMMENDATIONS**:
+${Object.entries(ai.positionAnalysis).slice(0, 5).map(([symbol, rec]) => 
+  `• **${symbol}**: ${rec.recommendation.toUpperCase()} - ${rec.reasoning}`
+).join('\n')}
+
+⚡ **OPTIONS ALERTS**:
+${Object.entries(ai.optionsAnalysis).slice(0, 3).map(([option, rec]) => 
+  `• **${option}**: ${rec.recommendation.toUpperCase()} (${rec.threatLevel} risk)`
+).join('\n')}
+
+💡 **SUGGESTED TRADES**:
+${ai.suggestedTrades.map(trade => 
+  `• ${trade.action.toUpperCase()} ${trade.symbol} ${trade.type} - ${trade.reasoning}`
+).join('\n')}
+
+📅 **WEEKLY GOALS**:
+${ai.weeklyGoals.map((goal, i) => `${i + 1}. ${goal}`).join('\n')}
+
+_Reply with position symbols for detailed analysis_
+    `;
+  }
+
+  getHealthEmoji(health) {
+    const emojis = {
+      excellent: '🟢',
+      good: '🟢',
+      fair: '🟡',
+      poor: '🔴'
+    };
+    return emojis[health] || '⚪';
+  }
+
+  async getDetailedPositionAnalysis(symbol, portfolioData) {
+    // Get current market data
+    const quote = this.marketData.getQuote(symbol);
+    const technicals = this.marketData.getTechnicals(symbol);
+    
+    const position = portfolioData.positions.find(p => p.symbol === symbol) ||
+                     portfolioData.options.find(o => o.symbol === symbol);
+    
+    if (!position) {
+      return `Position ${symbol} not found in portfolio`;
+    }
+
+    const prompt = `
+Provide detailed analysis for position:
+Symbol: ${symbol}
+Position: ${JSON.stringify(position)}
+Current Price: ${quote?.price || 'N/A'}
+Technical Indicators: ${JSON.stringify(technicals)}
+
+Format response as actionable trading plan with specific price levels and timeframes.
+    `;
+
+    // Get AI analysis for specific position
+    // ... implementation
+  }
+
+  storeAnalysis(userId, portfolio, analysis) {
+    this.portfolioHistory.push({
+      userId,
+      timestamp: new Date().toISOString(),
+      portfolio,
+      analysis
+    });
+    
+    // Keep last 100 analyses
+    if (this.portfolioHistory.length > 100) {
+      this.portfolioHistory = this.portfolioHistory.slice(-100);
+    }
+    
+    this.currentPortfolio = portfolio;
+  }
+
+  async createInteractiveSession(userId, portfolioData) {
+    return {
+      sessionId: `session_${Date.now()}`,
+      userId,
+      portfolio: portfolioData,
+      context: [],
+      startTime: new Date().toISOString()
+    };
+  }
+}
+
+module.exports = PortfolioAnalyzer;

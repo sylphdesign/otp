@@ -1,0 +1,47 @@
+{
+  "name": "otp",
+  "version": "1.0.0",
+  "description": "AI-powered Telegram trading bot",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "alerts": "node src/testIntegration.js",
+    "dev": "nodemon --config nodemon.json src/app.js",
+    "test": "echo \"Testing in development\"",
+    "logs": "tail -f logs/bot.log"
+  },
+  "keywords": [
+    "trading",
+    "telegram",
+    "ai",
+    "bot"
+  ],
+  "author": "Dhruv",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.56.0",
+    "@polygon.io/client-js": "^7.4.0",
+    "axios": "^1.10.0",
+    "cheerio": "^1.1.1",
+    "csv-parse": "^6.1.0",
+    "csv-stringify": "^6.6.0",
+    "dotenv": "^17.2.0",
+    "node-cron": "^4.2.1",
+    "node-schedule": "^2.1.1",
+    "openai": "^5.10.1",
+    "robinhood": "^1.8.0",
+    "sharp": "^0.34.3",
+    "technicalindicators": "^3.1.0",
+    "telegraf": "^4.16.3",
+    "tesseract.js": "^6.0.1",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.3",
+    "yahoo-finance2": "^2.13.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "jest": "^30.0.4",
+    "nodemon": "^3.1.10",
+    "supertest": "^7.1.3"
+  }
+}

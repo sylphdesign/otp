@@ -1,0 +1,6 @@
+.env
+logs/
+*.log
+node_modules/
+executed_trades.json
+trading_alerts.json
