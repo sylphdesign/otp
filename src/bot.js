@@ -4,6 +4,7 @@ const path = require('path');
 const AdvancedAIAnalyzer = require('./ai/advancedAnalyzer');
 const RealTimeMarketData = require('./market/realTimeData');
 const OptionsFlowMonitor = require('./market/optionsFlow');
+const { setupTradePlanScheduler } = require('./scheduler/tradePlanScheduler');
 
 class TradingBot {
   constructor() {
@@ -24,6 +25,9 @@ class TradingBot {
     this.setupMiddleware();
     this.setupCommands();
     this.setupMessageHandlers();
+    
+    // Setup trade plan scheduler
+    setupTradePlanScheduler(this);
   }
 
   setupAdvancedFeatures() {
