@@ -1,12 +1,29 @@
 const AIAnalyzer = require('./analyzer');
 const EventEmitter = require('events');
 
-class AdvancedAIAnalyzer extends EventEmitter {
+class AdvancedAIAnalyzer extends AIAnalyzer {
   constructor(marketData, optionsFlow) {
     super();
+    this.emitter = new EventEmitter();
     this.marketData = marketData;
     this.optionsFlow = optionsFlow;
     this.setupMarketDataListeners();
+  }
+
+  on(...args) {
+    this.emitter.on(...args);
+  }
+
+  once(...args) {
+    this.emitter.once(...args);
+  }
+
+  off(...args) {
+    this.emitter.off(...args);
+  }
+
+  emit(...args) {
+    this.emitter.emit(...args);
   }
 
   setupMarketDataListeners() {
